@@ -45,5 +45,6 @@ final class Microphone implements AutoCloseable {
             finally { running=false;try { recorder.stop(); } catch(RuntimeException ignored) {} recorder.release(); }
         },"Quest microphone");worker.start();
     }
+    boolean active() { return running; }
     public void close() { running=false;try { recorder.stop(); } catch(RuntimeException ignored) {} }
 }

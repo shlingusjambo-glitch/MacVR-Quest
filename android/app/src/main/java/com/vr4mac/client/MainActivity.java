@@ -115,16 +115,22 @@ public final class MainActivity extends Activity {
         destination.writeByte(type); destination.writeInt(Integer.reverseBytes(payload.length)); destination.write(payload); destination.flush();
     }
     private void disconnect() {
-        stopMicrophone();
-        try { if (socket != null) socket.close(); } catch (IOException ignored) {}
-        socket = null; output = null;
+        // Close before taking the send monitor: closing wakes a blocked TCP write
+        // that might otherwise keep stopMicrophone() waiting forever.
+        Socket old=socket;
+        try { if(old!=null) old.close(); } catch(IOException ignored) {}
+        synchronized(this) {
+            if(socket==old) { socket=null;output=null;stopMicrophone(); }
+        }
     }
     private synchronized void stopMicrophone() {
         Microphone old=microphone;microphone=null;if(old!=null)old.close();
     }
     private synchronized void controlMicrophone(boolean enabled, Socket owner) {
+        if(owner!=socket) return;
+        if(enabled && microphone!=null && microphone.active()) return;
         stopMicrophone();
-        if(!enabled || owner!=socket) return;
+        if(!enabled) return;
         if(checkSelfPermission(android.Manifest.permission.RECORD_AUDIO)!=android.content.pm.PackageManager.PERMISSION_GRANTED) {
             Log.w("VR4Mac","Microphone permission denied; capture disabled");return;
         }
@@ -218,7 +224,7 @@ public final class MainActivity extends Activity {
         for (double scale : new double[] {1.5, 1.25, 1.0}) {
             int w=Math.min(2048,(int)(eyeWidth*scale)/32*32);
             int h=Math.min(2048,(int)(eyeHeight*scale)/32*32);
-            if (w > 0 && h > 0 && hardwareHevcDecoder(w*2,h,72) != null) return new int[] {w,h};
+            if (w > 0 && h > 0 && hardwareHevcDecoder(w*2,h,Math.round(displayRefreshRate)) != null) return new int[] {w,h};
         }
         return null;
     }
@@ -232,6 +238,7 @@ public final class MainActivity extends Activity {
         int width=config.getInt("eye_w"), height=config.getInt("eye_h");
         String selected = config.getString("codec");
         int fps=config.optInt("fps",72);
+        if(fps<30 || fps>144) throw new IOException("Unsupported CONFIG frame rate");
         synchronized(codecLock) {
             if(codec!=null && width==configuredWidth && height==configuredHeight && fps==configuredFps && selected.equals(configuredCodec)) return;
         }
