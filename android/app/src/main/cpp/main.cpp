@@ -6,6 +6,7 @@
 #include <openxr/openxr_platform.h>
 #include <android/log.h>
 #include "vr4mac.h"
+#include "PosePrediction.h"
 static_assert(sizeof(VR4Tracking)==284, "TRACKING contract changed");
 static_assert(sizeof(VR4VideoHeader)==17, "VIDEO contract changed");
 #include <atomic>
@@ -26,7 +27,7 @@ static std::deque<Haptic> haptics;
 static void check(XrResult r, const char* operation) { if (XR_FAILED(r)) throw std::runtime_error(std::string(operation)+": "+std::to_string(r)); }
 #define XR(call) check(call,#call)
 static XrPosef identity() { XrPosef p{}; p.orientation.w=1; return p; }
-struct Snapshot { XrTime time; std::array<XrView,2> views; };
+struct Snapshot { XrTime displayTime; XrTime time; std::array<XrView,2> views; };
 struct Client {
     JNIEnv* env; jobject activity; JavaVM* vm;
     bool stageSpace=true;
@@ -44,6 +45,8 @@ struct Client {
     jfloatArray transformArray{};
     std::array<float,16> transform{1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1};
     std::deque<Snapshot> history;
+    PosePrediction prediction;
+    XrTime predictionLogTime=0;
     Snapshot rendered{}; bool hasVideo=false, running=false, focused=false, refreshReported=false;
     XrPath path(const char* s) { XrPath p; XR(xrStringToPath(instance,s,&p)); return p; }
     XrAction action(const char* name, XrActionType type) {
@@ -169,11 +172,11 @@ struct Client {
                 if(event.type==XR_TYPE_EVENT_DATA_SESSION_STATE_CHANGED) {
                     auto state=reinterpret_cast<XrEventDataSessionStateChanged*>(&event)->state;
                     focused=state==XR_SESSION_STATE_FOCUSED;
-                    if(state==XR_SESSION_STATE_READY) { XrSessionBeginInfo begin{XR_TYPE_SESSION_BEGIN_INFO}; begin.primaryViewConfigurationType=XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO; XR(xrBeginSession(session,&begin)); running=true; }
+                    if(state==XR_SESSION_STATE_READY) { XrSessionBeginInfo begin{XR_TYPE_SESSION_BEGIN_INFO}; begin.primaryViewConfigurationType=XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO; XR(xrBeginSession(session,&begin)); running=true; prediction.reset(); history.clear(); hasVideo=false; }
                     if(state==XR_SESSION_STATE_STOPPING) { XR(xrEndSession(session)); running=false; }
                     if(state==XR_SESSION_STATE_EXITING||state==XR_SESSION_STATE_LOSS_PENDING) stopping=true;
                 } else if(event.type==XR_TYPE_EVENT_DATA_INSTANCE_LOSS_PENDING) stopping=true;
-                else if(event.type==XR_TYPE_EVENT_DATA_REFERENCE_SPACE_CHANGE_PENDING) { history.clear();hasVideo=false; }
+                else if(event.type==XR_TYPE_EVENT_DATA_REFERENCE_SPACE_CHANGE_PENDING) { history.clear();hasVideo=false;prediction.reset(); }
                 event={XR_TYPE_EVENT_DATA_BUFFER};
             }
             if(!running || stopping) { std::this_thread::sleep_for(std::chrono::milliseconds(10)); continue; }
@@ -187,14 +190,18 @@ struct Client {
                     refreshReported=true;
                 }
             }
-            Snapshot snapshot{}; snapshot.time=frame.predictedDisplayTime; for(auto& view:snapshot.views) view.type=XR_TYPE_VIEW;
+            Snapshot snapshot{}; snapshot.displayTime=frame.predictedDisplayTime; snapshot.time=snapshot.displayTime+prediction.lead; for(auto& view:snapshot.views) view.type=XR_TYPE_VIEW;
             XrViewLocateInfo locate{XR_TYPE_VIEW_LOCATE_INFO}; locate.viewConfigurationType=XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO; locate.displayTime=snapshot.time; locate.space=space;
             XrViewState viewState{XR_TYPE_VIEW_STATE}; uint32_t count; XR(xrLocateViews(session,&locate,&viewState,2,&count,snapshot.views.data()));
             bool validViews=count==2 && (viewState.viewStateFlags & XR_VIEW_STATE_ORIENTATION_VALID_BIT) != 0;
             if(validViews) { tracking(snapshot); history.push_back(snapshot); while(history.size()>144) history.pop_front(); }
             jlong videoTime=env->CallLongMethod(activity,update,transformArray);
-            if(videoTime>0) { env->GetFloatArrayRegion(transformArray,0,16,transform.data()); hasVideo=false; for(auto& entry:history) if(entry.time/1000==videoTime/1000) { rendered=entry;hasVideo=true;break; } }
-            if(hasVideo && snapshot.time-rendered.time>1000000000LL) hasVideo=false;
+            if(videoTime>0) { env->GetFloatArrayRegion(transformArray,0,16,transform.data()); hasVideo=false; for(auto& entry:history) if(entry.time/1000==videoTime/1000) { rendered=entry;hasVideo=true;prediction.observe(frame.predictedDisplayTime,entry.displayTime);break; } }
+            if(frame.predictedDisplayTime-predictionLogTime>=5000000000LL) {
+                __android_log_print(ANDROID_LOG_INFO,"VR4Mac","Pose prediction lead %.1f ms; video age %.1f ms",prediction.lead/1e6,hasVideo?(frame.predictedDisplayTime-rendered.displayTime)/1e6:-1.0);
+                predictionLogTime=frame.predictedDisplayTime;
+            }
+            if(hasVideo && frame.predictedDisplayTime-rendered.displayTime>1000000000LL) hasVideo=false;
             std::array<XrCompositionLayerProjectionView,2> projectionViews{};
             bool submit=validViews && frame.shouldRender;
             if(submit) for(int eye=0;eye<2;eye++) {
