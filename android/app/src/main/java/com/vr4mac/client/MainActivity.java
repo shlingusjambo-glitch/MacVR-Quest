@@ -30,6 +30,8 @@ public final class MainActivity extends Activity {
     private Surface surface;
     private final AtomicBoolean imageReady = new AtomicBoolean();
     private MediaCodec codec;
+    private int configuredWidth, configuredHeight, configuredFps;
+    private String configuredCodec="";
     private volatile String codecDescription = "none";
     private boolean hevcDisabled;
     private volatile AudioPlayer audio;
@@ -229,6 +231,10 @@ public final class MainActivity extends Activity {
         JSONObject config = new JSONObject(new String(payload, java.nio.charset.StandardCharsets.UTF_8));
         int width=config.getInt("eye_w"), height=config.getInt("eye_h");
         String selected = config.getString("codec");
+        int fps=config.optInt("fps",72);
+        synchronized(codecLock) {
+            if(codec!=null && width==configuredWidth && height==configuredHeight && fps==configuredFps && selected.equals(configuredCodec)) return;
+        }
         if (width < 1 || width > 2048 || height < 1 || height > 2048 || !("h264".equals(selected) || "hevc".equals(selected))) throw new IOException("Unsupported CONFIG");
         String mime = "hevc".equals(selected) ? "video/hevc" : "video/avc";
         String hevcName = "hevc".equals(selected) ? hardwareHevcDecoder(width*2, height, config.optInt("fps",72)) : null;
@@ -254,7 +260,7 @@ public final class MainActivity extends Activity {
                 format.removeKey(vendorLowLatency); qualcomm=false;
                 codec.configure(format, surface, null, 0);
             }
-            codec.start(); needIdr = true; idrWaitSince=System.nanoTime(); lastIdrRequest=idrWaitSince;
+            codec.start(); configuredWidth=width;configuredHeight=height;configuredFps=fps;configuredCodec=selected; needIdr = true; idrWaitSince=System.nanoTime(); lastIdrRequest=idrWaitSince;
             codecDescription = codec.getName() + ", codec=" + selected + ", qti-low-latency-requested=" + qualcomm;
             Log.i("VR4Mac", codecDescription);
         }
