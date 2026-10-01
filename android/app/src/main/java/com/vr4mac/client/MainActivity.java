@@ -33,6 +33,7 @@ public final class MainActivity extends Activity {
     private volatile String codecDescription = "none";
     private boolean hevcDisabled;
     private volatile AudioPlayer audio;
+    private Microphone microphone;
     private long idrWaitSince, lastIdrRequest;
     private final Object codecLock = new Object();
     private final android.util.LongSparseArray<long[]> enqueueTimes = new android.util.LongSparseArray<>();
@@ -50,7 +51,13 @@ public final class MainActivity extends Activity {
 
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
+        if(checkSelfPermission(android.Manifest.permission.RECORD_AUDIO)!=android.content.pm.PackageManager.PERMISSION_GRANTED)
+            requestPermissions(new String[]{android.Manifest.permission.RECORD_AUDIO},81);
         xrThread = new Thread(this::runXR, "OpenXR"); xrThread.start();
+    }
+    @Override public void onRequestPermissionsResult(int request, String[] permissions, int[] results) {
+        super.onRequestPermissionsResult(request,permissions,results);
+        if(request==81) disconnect(); // refresh HELLO capability after consent
     }
     @Override public void onDestroy() {
         alive = false; stopXR(); disconnect();
@@ -106,8 +113,25 @@ public final class MainActivity extends Activity {
         destination.writeByte(type); destination.writeInt(Integer.reverseBytes(payload.length)); destination.write(payload); destination.flush();
     }
     private void disconnect() {
+        stopMicrophone();
         try { if (socket != null) socket.close(); } catch (IOException ignored) {}
         socket = null; output = null;
+    }
+    private synchronized void stopMicrophone() {
+        Microphone old=microphone;microphone=null;if(old!=null)old.close();
+    }
+    private synchronized void controlMicrophone(boolean enabled, Socket owner) {
+        stopMicrophone();
+        if(!enabled || owner!=socket) return;
+        if(checkSelfPermission(android.Manifest.permission.RECORD_AUDIO)!=android.content.pm.PackageManager.PERMISSION_GRANTED) {
+            Log.w("VR4Mac","Microphone permission denied; capture disabled");return;
+        }
+        try { microphone=new Microphone(packet -> {
+            synchronized(MainActivity.this) {
+                if(owner!=socket || output==null) throw new IOException("Microphone connection ended");
+                send(8,packet);
+            }
+        }); } catch(RuntimeException e) { Log.w("VR4Mac","Microphone unavailable",e); }
     }
     private Socket connect() throws IOException {
         String host = getIntent().getStringExtra("host");
@@ -132,6 +156,7 @@ public final class MainActivity extends Activity {
                 if (!refreshReady.await(2, TimeUnit.SECONDS)) Log.w("VR4Mac", "XR refresh unavailable; using 72 Hz handshake fallback");
                 JSONObject hello = new JSONObject().put("device", android.os.Build.MODEL).put("eye_w", eyeWidth).put("eye_h", eyeHeight)
                     .put("reference_space", stageSpace ? "stage" : "local").put("refresh_rates", new org.json.JSONArray().put((double)displayRefreshRate)).put("codecs", advertisedCodecs()).put("audio", audio != null && audio.available());
+                hello.put("mic",checkSelfPermission(android.Manifest.permission.RECORD_AUDIO)==android.content.pm.PackageManager.PERMISSION_GRANTED);
                 int[] hevcSize = supportedHevcSize();
                 if (hevcSize != null) hello.put("hevc_max_eye_w",hevcSize[0]).put("hevc_max_eye_h",hevcSize[1]);
                 send(1, hello.toString().getBytes(java.nio.charset.StandardCharsets.UTF_8));
@@ -142,7 +167,7 @@ public final class MainActivity extends Activity {
                     if (length < 0 || length > 8*1024*1024) throw new IOException("Invalid packet size");
                     byte[] payload = new byte[length]; input.readFully(payload);
                     if (type == 2) {
-                        try { configure(payload); }
+                        try { configure(payload); controlMicrophone(new JSONObject(new String(payload,java.nio.charset.StandardCharsets.UTF_8)).optBoolean("mic",false),connected); }
                         catch (Exception failure) {
                             if ("hevc".equals(new JSONObject(new String(payload, java.nio.charset.StandardCharsets.UTF_8)).optString("codec"))) {
                                 hevcDisabled = true;
