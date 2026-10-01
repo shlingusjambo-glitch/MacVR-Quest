@@ -130,6 +130,7 @@ struct Client {
             bind(aim,base+"/input/aim/pose"); bind(grip,base+"/input/grip/pose"); bind(trigger,base+"/input/trigger/value"); bind(squeeze,base+"/input/squeeze/value"); bind(stick,base+"/input/thumbstick"); bind(vibrate,base+"/output/haptic");
             bind(buttons[5],base+"/input/thumbstick/click"); bind(buttons[6],base+"/input/trigger/touch"); bind(buttons[7],base+"/input/thumbrest/touch"); bind(buttons[8],base+"/input/thumbstick/touch");
             if(hand) { bind(buttons[0],base+"/input/a/click"); bind(buttons[1],base+"/input/b/click"); } else { bind(buttons[2],base+"/input/x/click"); bind(buttons[3],base+"/input/y/click"); bind(buttons[4],base+"/input/menu/click"); }
+            for(const char* t: hand ? std::initializer_list<const char*>{"a","b"} : std::initializer_list<const char*>{"x","y"}) bind(buttons[7],base+"/input/"+t+"/touch");   // thumb resting on a face button counts as thumb touch
             XrActionSpaceCreateInfo sci{XR_TYPE_ACTION_SPACE_CREATE_INFO}; sci.subactionPath=hands[hand]; sci.poseInActionSpace=identity(); sci.action=aim; XR(xrCreateActionSpace(session,&sci,&aimSpace[hand])); sci.action=grip; XR(xrCreateActionSpace(session,&sci,&gripSpace[hand]));
         }
         XrInteractionProfileSuggestedBinding suggested{XR_TYPE_INTERACTION_PROFILE_SUGGESTED_BINDING}; suggested.interactionProfile=path("/interaction_profiles/oculus/touch_controller"); suggested.countSuggestedBindings=bindings.size(); suggested.suggestedBindings=bindings.data(); XR(xrSuggestInteractionProfileBindings(instance,&suggested));
