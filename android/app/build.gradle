@@ -1,0 +1,45 @@
+plugins { id 'com.android.application' }
+def signingNames = ['MACVR_KEYSTORE', 'MACVR_STORE_PASSWORD', 'MACVR_KEY_ALIAS', 'MACVR_KEY_PASSWORD']
+def signingValues = signingNames.collectEntries { [(it): System.getenv(it)] }
+def hasReleaseSigning = signingValues.values().every { it != null && !it.isEmpty() }
+android {
+    namespace 'com.vr4mac.client'
+    compileSdk 34
+    ndkVersion '27.2.12479018'
+    defaultConfig {
+        applicationId 'com.vr4mac.client'
+        minSdk 29
+        targetSdk 32
+        versionCode 1
+        versionName '0.1.0'
+        ndk { abiFilters 'arm64-v8a' }
+        externalNativeBuild { cmake { cppFlags '-std=c++17'; arguments '-DANDROID_STL=c++_shared' } }
+    }
+    compileOptions { sourceCompatibility JavaVersion.VERSION_17; targetCompatibility JavaVersion.VERSION_17 }
+    signingConfigs {
+        release {
+            if (hasReleaseSigning) {
+                storeFile file(signingValues.MACVR_KEYSTORE)
+                storePassword signingValues.MACVR_STORE_PASSWORD
+                keyAlias signingValues.MACVR_KEY_ALIAS
+                keyPassword signingValues.MACVR_KEY_PASSWORD
+            }
+        }
+    }
+    buildTypes { release { signingConfig signingConfigs.release } }
+    packaging { jniLibs { excludes += ['**/armeabi-v7a/**', '**/x86/**', '**/x86_64/**'] } }
+    buildFeatures { prefab true }
+    externalNativeBuild { cmake { path 'src/main/cpp/CMakeLists.txt'; version '3.22.1' } }
+}
+def verifyReleaseSigning = tasks.register('verifyReleaseSigning') {
+    doLast {
+        if (!hasReleaseSigning) {
+            throw new GradleException('Release signing requires ' + signingNames.join(', ') + ' environment variables. Keep the keystore outside the repository.')
+        }
+        if (!android.signingConfigs.release.storeFile.isFile()) {
+            throw new GradleException('Release keystore does not exist.')
+        }
+    }
+}
+tasks.configureEach { if (name == 'preReleaseBuild') dependsOn verifyReleaseSigning }
+dependencies { implementation 'org.khronos.openxr:openxr_loader_for_android:1.1.63' }
