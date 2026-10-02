@@ -67,8 +67,10 @@ struct Client {
         XR(xrEnumerateInstanceExtensionProperties(nullptr,extensionCount,&extensionCount,available.data()));
         bool refreshExtension=false;
         for(const auto& e:available) if(std::strcmp(e.extensionName,XR_FB_DISPLAY_REFRESH_RATE_EXTENSION_NAME)==0) refreshExtension=true;
+        for(const auto& e:available) if(std::strcmp(e.extensionName,XR_EXT_HAND_TRACKING_EXTENSION_NAME)==0) handExtension=true;
         std::vector<const char*> extensions{XR_KHR_ANDROID_CREATE_INSTANCE_EXTENSION_NAME,XR_KHR_OPENGL_ES_ENABLE_EXTENSION_NAME};
         if(refreshExtension) extensions.push_back(XR_FB_DISPLAY_REFRESH_RATE_EXTENSION_NAME);
+        if(handExtension) extensions.push_back(XR_EXT_HAND_TRACKING_EXTENSION_NAME);
         XrInstanceCreateInfoAndroidKHR android{XR_TYPE_INSTANCE_CREATE_INFO_ANDROID_KHR}; android.applicationVM=vm; android.applicationActivity=activity;
         XrInstanceCreateInfo info{XR_TYPE_INSTANCE_CREATE_INFO}; info.next=&android; strcpy(info.applicationInfo.applicationName,"VR4Mac"); info.applicationInfo.apiVersion=XR_MAKE_VERSION(1,0,0); info.enabledExtensionCount=extensions.size(); info.enabledExtensionNames=extensions.data();
         XR(xrCreateInstance(&info,&instance));
@@ -114,9 +116,40 @@ struct Client {
             XR(xrCreateSwapchain(session,&ci,&chains[eye])); XR(xrEnumerateSwapchainImages(chains[eye],0,&n,nullptr)); images[eye].resize(n); for(auto& image:images[eye]) image.type=XR_TYPE_SWAPCHAIN_IMAGE_OPENGL_ES_KHR;
             XR(xrEnumerateSwapchainImages(chains[eye],n,&n,reinterpret_cast<XrSwapchainImageBaseHeader*>(images[eye].data())));
         }
-        initActions(); initGL();
+        initActions(); initHands(); initGL();
         jclass cls=env->GetObjectClass(activity); prepare=env->GetMethodID(cls,"prepareVideo","(IIIZ)V"); update=env->GetMethodID(cls,"updateVideo","([F)J"); send=env->GetMethodID(cls,"sendTracking","([B)V"); release=env->GetMethodID(cls,"releaseVideo","()V");
         transformArray=env->NewFloatArray(16); env->CallVoidMethod(activity,prepare,(jint)texture,(jint)sizes[0].recommendedImageRectWidth,(jint)sizes[0].recommendedImageRectHeight,(jboolean)stageSpace);
+    }
+    // Hand tracking (XR_EXT_hand_tracking): joints ride along on the TRACKING packet while a hand is tracked.
+    bool handExtension=false; std::array<XrHandTrackerEXT,2> trackers{};
+    PFN_xrLocateHandJointsEXT locateJoints{}; PFN_xrDestroyHandTrackerEXT destroyTracker{};
+    void initHands() {
+        if(!handExtension) return;
+        PFN_xrCreateHandTrackerEXT create{};
+        xrGetInstanceProcAddr(instance,"xrCreateHandTrackerEXT",reinterpret_cast<PFN_xrVoidFunction*>(&create));
+        xrGetInstanceProcAddr(instance,"xrLocateHandJointsEXT",reinterpret_cast<PFN_xrVoidFunction*>(&locateJoints));
+        xrGetInstanceProcAddr(instance,"xrDestroyHandTrackerEXT",reinterpret_cast<PFN_xrVoidFunction*>(&destroyTracker));
+        if(!create||!locateJoints) return;
+        for(int hand=0;hand<2;hand++) {
+            XrHandTrackerCreateInfoEXT ci{XR_TYPE_HAND_TRACKER_CREATE_INFO_EXT}; ci.hand=hand?XR_HAND_RIGHT_EXT:XR_HAND_LEFT_EXT; ci.handJointSet=XR_HAND_JOINT_SET_DEFAULT_EXT;
+            if(XR_FAILED(create(session,&ci,&trackers[hand]))) trackers[hand]=XR_NULL_HANDLE;
+        }
+        __android_log_print(ANDROID_LOG_INFO,"VR4Mac","Hand tracking %s",trackers[0]?"on":"unavailable");
+    }
+    /// Appends VR4HandJoints[2] when either hand is tracked (controllers down).
+    void handJoints(std::vector<uint8_t>& b,XrTime time) {
+        if(!trackers[0]||!focused) return;
+        std::vector<uint8_t> extra; bool any=false;
+        for(int hand=0;hand<2;hand++) {
+            std::array<XrHandJointLocationEXT,XR_HAND_JOINT_COUNT_EXT> joints{};
+            XrHandJointLocationsEXT locs{XR_TYPE_HAND_JOINT_LOCATIONS_EXT}; locs.jointCount=XR_HAND_JOINT_COUNT_EXT; locs.jointLocations=joints.data();
+            XrHandJointsLocateInfoEXT li{XR_TYPE_HAND_JOINTS_LOCATE_INFO_EXT}; li.baseSpace=space; li.time=time;
+            bool ok=trackers[hand] && XR_SUCCEEDED(locateJoints(trackers[hand],&li,&locs)) && locs.isActive;
+            for(auto& j:joints) if((j.locationFlags&(XR_SPACE_LOCATION_POSITION_VALID_BIT|XR_SPACE_LOCATION_ORIENTATION_VALID_BIT))!=(XR_SPACE_LOCATION_POSITION_VALID_BIT|XR_SPACE_LOCATION_ORIENTATION_VALID_BIT)) ok=false;
+            put(extra,(uint32_t)(ok?1:0)); any|=ok;
+            for(auto& j:joints) pose(extra,ok?j.pose:identity());
+        }
+        if(any) b.insert(b.end(),extra.begin(),extra.end());
     }
     void initActions() {
         hands={path("/user/hand/left"),path("/user/hand/right")};
@@ -162,6 +195,7 @@ struct Client {
             get.action=stick; XrActionStateVector2f s{XR_TYPE_ACTION_STATE_VECTOR2F}; xrGetActionStateVector2f(session,&get,&s); put(b,focused && s.isActive?s.currentState.x:0.0f);put(b,focused && s.isActive?s.currentState.y:0.0f);
         }
         if(b.size()!=sizeof(VR4Tracking)) throw std::runtime_error("TRACKING layout mismatch");
+        handJoints(b,snapshot.time);
         jbyteArray packet=env->NewByteArray(b.size()); env->SetByteArrayRegion(packet,0,b.size(),reinterpret_cast<jbyte*>(b.data())); env->CallVoidMethod(activity,send,packet); env->DeleteLocalRef(packet);
         std::deque<Haptic> pending; { std::lock_guard<std::mutex> lock(hapticMutex); pending.swap(haptics); }
         for(auto& h:pending) { XrHapticActionInfo ai{XR_TYPE_HAPTIC_ACTION_INFO}; ai.action=vibrate; ai.subactionPath=hands[h.hand]; XrHapticVibration v{XR_TYPE_HAPTIC_VIBRATION}; v.amplitude=h.amplitude;v.duration=(XrDuration)(h.duration*1e9);v.frequency=h.frequency; if(focused) xrApplyHapticFeedback(session,&ai,reinterpret_cast<XrHapticBaseHeader*>(&v)); }
@@ -220,6 +254,7 @@ struct Client {
         if(release) env->CallVoidMethod(activity,release);
         if(transformArray) env->DeleteLocalRef(transformArray);
         for(auto s:chains) if(s) xrDestroySwapchain(s);
+        for(auto t:trackers) if(t&&destroyTracker) destroyTracker(t);
         for(auto s:aimSpace) if(s) xrDestroySpace(s);for(auto s:gripSpace) if(s) xrDestroySpace(s);
         if(headSpace) xrDestroySpace(headSpace);if(space) xrDestroySpace(space);if(session) xrDestroySession(session);if(actionSet) xrDestroyActionSet(actionSet);if(instance) xrDestroyInstance(instance);
         if(display!=EGL_NO_DISPLAY) { glDeleteTextures(1,&texture);glDeleteProgram(program);glDeleteFramebuffers(1,&fbo);glDeleteVertexArrays(1,&vao);eglMakeCurrent(display,EGL_NO_SURFACE,EGL_NO_SURFACE,EGL_NO_CONTEXT);if(context!=EGL_NO_CONTEXT)eglDestroyContext(display,context);if(eglSurface!=EGL_NO_SURFACE)eglDestroySurface(display,eglSurface);eglTerminate(display); }
