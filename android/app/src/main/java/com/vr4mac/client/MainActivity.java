@@ -21,6 +21,8 @@ public final class MainActivity extends Activity {
     private native void runXR();
     private native void stopXR();
     private native void haptic(int hand, float amplitude, float duration, float frequency);
+    private native float takeVideoAge();
+    private volatile byte[] status;   // next VR4_STATUS (decoder output thread builds it, tracking sender sends it)
     private volatile boolean alive = true;
     private volatile int eyeWidth, eyeHeight;
     private boolean stageSpace;
@@ -80,7 +82,10 @@ public final class MainActivity extends Activity {
         networkThread = new Thread(this::networkLoop, "VR4Mac network"); networkThread.start();
         trackingThread = new Thread(() -> {
             while (alive) {
-                try { byte[] packet = tracking.poll(500, TimeUnit.MILLISECONDS); if (packet != null) send(3, packet); }
+                try {
+                    byte[] packet = tracking.poll(500, TimeUnit.MILLISECONDS); if (packet != null) send(3, packet);
+                    byte[] s = status; if (s != null) { status = null; send(9, s); }
+                }
                 catch (Exception e) { disconnect(); }
             }
         }, "Tracking sender"); trackingThread.start();
@@ -313,21 +318,33 @@ public final class MainActivity extends Activity {
         if (requestIdr) send(7,new byte[0]);
     }
     private void outputLoop() {
-        long reportTime = System.nanoTime();
+        long reportTime = System.nanoTime(), logTime = reportTime;
+        android.os.BatteryManager battery = getSystemService(android.os.BatteryManager.class);
         while (alive) {
             try {
                 synchronized (codecLock) { if (codec != null) drain(); }
             } catch (Exception error) { Log.w("VR4Mac", "Decoder output failed", error); disconnect(); }
             long now=System.nanoTime();
-            if (now-reportTime >= 5_000_000_000L) {
-                long count=decodedFrames.getAndSet(0), nanos=decodeNanos.getAndSet(0);
-                double seconds=(now-reportTime)/1e9;
-                Log.i("VR4Mac", String.format(java.util.Locale.US,
-                    "Stream %.1f Mbps, decode %.1f fps, receive-to-release %.1f ms (input %.2f, decoder-hold %.2f, drain %.2f), dropped %d / %.1fs; %s",
-                    receivedBytes.getAndSet(0)*8/seconds/1e6, count/seconds,
-                    count > 0 ? nanos/(double)count/1e6 : 0,
-                    averageMillis(inputNanos.getAndSet(0),count), averageMillis(holdNanos.getAndSet(0),count),
-                    averageMillis(drainNanos.getAndSet(0),count), droppedFrames.getAndSet(0), seconds, codecDescription));
+            if (now-reportTime >= 1_000_000_000L) {   // one-second window: VR4_STATUS for the Mac; logged every 5 s
+                long count=decodedFrames.getAndSet(0), nanos=decodeNanos.getAndSet(0), dropped=droppedFrames.getAndSet(0);
+                double seconds=(now-reportTime)/1e9, mbps=receivedBytes.getAndSet(0)*8/seconds/1e6, receive=averageMillis(nanos,count);
+                double input=averageMillis(inputNanos.getAndSet(0),count), hold=averageMillis(holdNanos.getAndSet(0),count), drainMs=averageMillis(drainNanos.getAndSet(0),count);
+                float age=takeVideoAge();
+                try {
+                    JSONObject s=new JSONObject().put("decode_fps",count/seconds).put("receive_ms",receive).put("mbps",mbps).put("dropped",dropped);
+                    if (age >= 0) s.put("latency_ms",(double)age);
+                    if (battery != null) {
+                        int level=battery.getIntProperty(android.os.BatteryManager.BATTERY_PROPERTY_CAPACITY);
+                        if (level >= 0 && level <= 100) s.put("battery",level).put("charging",battery.isCharging());
+                    }
+                    status=s.toString().getBytes(java.nio.charset.StandardCharsets.UTF_8);
+                } catch (org.json.JSONException ignored) {}
+                if (now-logTime >= 5_000_000_000L) {
+                    Log.i("VR4Mac", String.format(java.util.Locale.US,
+                        "Stream %.1f Mbps, decode %.1f fps, receive-to-release %.1f ms (input %.2f, decoder-hold %.2f, drain %.2f), frame age %.1f ms, dropped %d / %.1fs; %s",
+                        mbps, count/seconds, receive, input, hold, drainMs, age, dropped, seconds, codecDescription));
+                    logTime=now;
+                }
                 reportTime=now;
             }
             try { Thread.sleep(2); } catch (InterruptedException e) { break; }

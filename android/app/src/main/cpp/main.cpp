@@ -21,6 +21,7 @@ static_assert(sizeof(VR4VideoHeader)==17, "VIDEO contract changed");
 #include <chrono>
 
 static std::atomic<bool> stopping{false};
+static std::atomic<long long> videoAgeSum{0}; static std::atomic<int> videoAgeCount{0};   // VR4_STATUS latency_ms (Java takes the average)
 struct Haptic { int hand; float amplitude,duration,frequency; };
 static std::mutex hapticMutex;
 static std::deque<Haptic> haptics;
@@ -237,6 +238,7 @@ struct Client {
                 predictionLogTime=frame.predictedDisplayTime;
             }
             if(hasVideo && frame.predictedDisplayTime-rendered.displayTime>1000000000LL) hasVideo=false;
+            if(hasVideo) { videoAgeSum+=frame.predictedDisplayTime-rendered.displayTime; videoAgeCount++; }
             std::array<XrCompositionLayerProjectionView,2> projectionViews{};
             bool submit=validViews && frame.shouldRender;
             if(submit) for(int eye=0;eye<2;eye++) {
@@ -266,4 +268,6 @@ extern "C" JNIEXPORT void JNICALL Java_com_vr4mac_client_MainActivity_runXR(JNIE
     c.cleanup();
 }
 extern "C" JNIEXPORT void JNICALL Java_com_vr4mac_client_MainActivity_stopXR(JNIEnv*,jobject) { stopping=true; }
+/// Average age (ms) of the shown frames' poses since the last call; -1 if no video was shown.
+extern "C" JNIEXPORT jfloat JNICALL Java_com_vr4mac_client_MainActivity_takeVideoAge(JNIEnv*,jobject) { long long s=videoAgeSum.exchange(0); int n=videoAgeCount.exchange(0); return n>0?(jfloat)(s/1e6/n):-1.0f; }
 extern "C" JNIEXPORT void JNICALL Java_com_vr4mac_client_MainActivity_haptic(JNIEnv*,jobject,jint hand,jfloat amplitude,jfloat duration,jfloat frequency) { std::lock_guard<std::mutex> lock(hapticMutex); if(haptics.size()<32) haptics.push_back({hand,amplitude,duration,frequency}); }
