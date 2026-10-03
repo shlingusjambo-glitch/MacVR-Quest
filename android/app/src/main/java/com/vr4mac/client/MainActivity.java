@@ -146,21 +146,28 @@ public final class MainActivity extends Activity {
             }
         }); } catch(RuntimeException e) { Log.w("VR4Mac","Microphone unavailable",e); }
     }
+    // USB first (adb reverse makes 127.0.0.1 reach the Mac). Then Wi-Fi: ask "VR4MAC?" on UDP 9944 and connect to the
+    // Mac that answers. The Mac never broadcasts; networkLoop asks again about every second until one answers.
     private Socket connect() throws IOException {
         String host = getIntent().getStringExtra("host");
         Socket candidate = new Socket(); candidate.setReceiveBufferSize(2*1024*1024);
-        try { candidate.connect(new InetSocketAddress(host == null ? "127.0.0.1" : host, 9945), 800); return candidate; }
+        try { candidate.connect(new InetSocketAddress(host == null ? "127.0.0.1" : host, 9945), 300); return candidate; }
         catch (IOException e) { candidate.close(); if (host != null) throw e; }
-        try (DatagramSocket discovery = new DatagramSocket(9944)) {
-            discovery.setSoTimeout(1500);
+        if (pairToken().isEmpty()) throw new IOException("Not paired yet: connect once over USB");
+        try (DatagramSocket discovery = new DatagramSocket()) {
+            discovery.setBroadcast(true); discovery.setSoTimeout(600);
+            byte[] ask = "VR4MAC?".getBytes(java.nio.charset.StandardCharsets.US_ASCII);
+            discovery.send(new DatagramPacket(ask, ask.length, java.net.InetAddress.getByName("255.255.255.255"), 9944));
             byte[] buf = new byte[128]; DatagramPacket packet = new DatagramPacket(buf, buf.length);
             discovery.receive(packet);
-            if (!new String(buf, 0, packet.getLength(), java.nio.charset.StandardCharsets.US_ASCII).trim().equals("VR4MAC 9945")) throw new IOException("Unknown discovery packet");
+            if (!new String(buf, 0, packet.getLength(), java.nio.charset.StandardCharsets.US_ASCII).trim().equals("VR4MAC 9945")) throw new IOException("Unknown discovery reply");
             candidate = new Socket(); candidate.setReceiveBufferSize(2*1024*1024);
             try { candidate.connect(new InetSocketAddress(packet.getAddress(), 9945), 1500); return candidate; }
             catch (IOException e) { candidate.close(); throw e; }
         }
     }
+    // Wi-Fi pairing token, handed over by the Mac in CONFIG while on USB.
+    private String pairToken() { return getSharedPreferences("vr4mac", MODE_PRIVATE).getString("pair", ""); }
     private void networkLoop() {
         while (alive) {
             try {
@@ -172,6 +179,7 @@ public final class MainActivity extends Activity {
                 hello.put("mic",checkSelfPermission(android.Manifest.permission.RECORD_AUDIO)==android.content.pm.PackageManager.PERMISSION_GRANTED);
                 int[] hevcSize = supportedHevcSize();
                 if (hevcSize != null) hello.put("hevc_max_eye_w",hevcSize[0]).put("hevc_max_eye_h",hevcSize[1]);
+                hello.put("token", pairToken());
                 send(1, hello.toString().getBytes(java.nio.charset.StandardCharsets.UTF_8));
                 DataInputStream input = new DataInputStream(connected.getInputStream());
                 needIdr = true;
@@ -180,7 +188,10 @@ public final class MainActivity extends Activity {
                     if (length < 0 || length > 8*1024*1024) throw new IOException("Invalid packet size");
                     byte[] payload = new byte[length]; input.readFully(payload);
                     if (type == 2) {
-                        try { configure(payload); controlMicrophone(new JSONObject(new String(payload,java.nio.charset.StandardCharsets.UTF_8)).optBoolean("mic",false),connected); }
+                        try {
+                            String pair = new JSONObject(new String(payload,java.nio.charset.StandardCharsets.UTF_8)).optString("pair","");
+                            if (!pair.isEmpty() && !pair.equals(pairToken())) getSharedPreferences("vr4mac", MODE_PRIVATE).edit().putString("pair", pair).apply();
+                            configure(payload); controlMicrophone(new JSONObject(new String(payload,java.nio.charset.StandardCharsets.UTF_8)).optBoolean("mic",false),connected); }
                         catch (Exception failure) {
                             if ("hevc".equals(new JSONObject(new String(payload, java.nio.charset.StandardCharsets.UTF_8)).optString("codec"))) {
                                 hevcDisabled = true;
@@ -199,7 +210,7 @@ public final class MainActivity extends Activity {
                 }
             } catch (Exception e) { if (alive) Log.w("VR4Mac", "Reconnecting: " + e); }
             finally { disconnect(); AudioPlayer player=audio; if(player != null) player.reset(); synchronized (codecLock) { releaseCodec(); } }
-            if (alive) try { Thread.sleep(500); } catch (InterruptedException e) { break; }
+            if (alive) try { Thread.sleep(300); } catch (InterruptedException e) { break; }
         }
     }
     // Codec input/output calls and reconfiguration share a short lock. Network sends stay outside it.

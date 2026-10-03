@@ -24,7 +24,7 @@ adb reverse tcp:9945 tcp:9945
 adb shell am start -n com.vr4mac.client/.MainActivity
 ```
 
-Find VR4Mac in the headset's Unknown Sources library. The client first tries the USB reverse endpoint, then listens for the Mac's UDP discovery broadcast on port 9944. For Wi-Fi networks that block broadcasts, use an explicit Mac address:
+Find VR4Mac in the headset's Unknown Sources library. The client first tries the USB reverse endpoint, then (once paired over USB) sends a `VR4MAC?` probe to UDP port 9944 about once a second and connects to the Mac that answers `VR4MAC 9945`. The Mac only answers; it never broadcasts. For Wi-Fi networks that block broadcasts, use an explicit Mac address:
 
 ```sh
 adb shell am force-stop com.vr4mac.client
